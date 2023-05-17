@@ -1,7 +1,15 @@
 import puppeteer from 'puppeteer'
 import Promise from 'bluebird'
+// import * as fuzz from 'fuzzball'
+
 const URL = {
   olx: 'https://olx.ro/'
+}
+
+const KEYBOARD = {
+  priceRange: '4000',
+  enter: 'Enter',
+  searchText: 'iPhone 14 pro max 100'
 }
 
 const SELECTORS = {
@@ -13,129 +21,153 @@ const SELECTORS = {
   priceRangeFrom: "input[placeholder='De la']",
   sortBy: 'div:has(+ svg[data-testid="sorting-icon"])',
   cheap: 'div[data-testid="flyout-content"] div:first-child',
-  nextPage: 'a[data-cy="pagination-forward"]'
+  nextPage: 'a[data-cy="pagination-forward"]',
+  itemsOnPage: 'div[data-cy="l-card"]',
+  featuredItems: "div[data-testid='adCard-featured']",
+  itemTitle: 'div[data-cy="l-card"] a h6',
+  itemPrice: 'p[data-testid="ad-price"]',
+  itemLink: 'a',
+  itemDescription: 'div[data-cy="ad_description"] > div',
+  buttonByText: "//span[contains(., 'Telefoane')]"
 }
 
 const REGEXES = {
   iPhone14ProMax: /^.*iPhone 14 Pro Max.*$/gi,
-  viataBaterie: /[^.*Baterie 100%.*$] || [^.*Bateriei 100%.*$] || [^.*100% Baterie.*$] || [^.*Baterie 100.*$] || [^.*Bateriei 100.*$] || [^.*Bat 100%.*$] || [^.*100% Bat.*$] || [^.*Bat 100.*$] || [^.*100 Bat.*$] /gi
+  batteryLife: /100%/gi
 };
 
 (async () => {
-  const delay = (time) => {
-    return new Promise(function (resolve) {
-      setTimeout(resolve, time)
-    })
-  }
+  const browser = await puppeteer.launch({ headless: false, args: ['--start-maximized'], slowMo: 30 })
+  const page2 = await browser.newPage()
 
-  const browser = await puppeteer.launch({ headless: false, args: ['--start-maximized'] })
   const page = await browser.newPage()
+
+  await page2.setViewport({ width: 1920, height: 1080 })
+
   await page.setViewport({ width: 1920, height: 1080 })
 
   await page.goto(URL.olx)
 
   await page.click(SELECTORS.acceptCookies)
 
-  await page.type(SELECTORS.searchBar, 'iPhone 14 pro max 100')
+  await page.type(SELECTORS.searchBar, KEYBOARD.searchText)
 
   await page.click(SELECTORS.searchButton)
-
-  await delay(2000)
 
   await page.waitForSelector(SELECTORS.categoryDropDown)
 
   await page.click(SELECTORS.categoryDropDown)
 
-  await delay(1000)
+  await page.waitForSelector(SELECTORS.selectedCategory)
 
   await page.hover(SELECTORS.selectedCategory)
 
-  const [button] = await page.$x("//span[contains(., 'Telefoane')]")
+  await page.waitForSelector(SELECTORS.selectedCategory)
+
+  const [button] = await page.$x(SELECTORS.buttonByText)
   if (button) {
     await button.click()
   };
 
-  await delay(3000)
+  await page.waitForSelector(SELECTORS.priceRangeFrom)
 
   await page.click(SELECTORS.priceRangeFrom)
 
-  await page.keyboard.type('4000')
+  await page.keyboard.type(KEYBOARD.priceRange)
 
-  await page.keyboard.press('Enter')
-
-  await delay(3000)
+  await page.waitForSelector(SELECTORS.sortBy)
 
   await page.click(SELECTORS.sortBy)
 
+  await page.waitForSelector(SELECTORS.cheap)
+
   await page.click(SELECTORS.cheap)
 
-  await delay(3000)
+  await page.waitForNavigation({ waitUntil: 'networkidle0' })
 
-  async function getItems () {
-    let options = await page.$$eval('div[data-cy="l-card"]', options => {
-      return options.filter(option => {
-        if (option.querySelectorAll("div[data-testid='adCard-featured']").length) {
+  // await page.waitForSelector('button[data-testid="fav-search-btn"]')
+
+  async function getItemsWithoutFeatured () {
+    // Selects all items on page
+    return page.$$eval(SELECTORS.itemsOnPage, (elem, SELECTORS) => {
+      // Removes promoted items
+      elem = elem.filter(item => {
+        if (item.querySelectorAll(SELECTORS.featuredItems).length) {
           return false
         }
         return true
-      }).map(option => {
+      })
+      // Gets title, price and link of each item
+      return elem.map(item => {
         return {
-          title: option.querySelector('div[data-cy="l-card"] a h6').textContent,
-          price: option.querySelector('p[data-testid="ad-price"]').textContent,
-          link: option.querySelector('a').href
+          title: item.querySelector(SELECTORS.itemTitle).textContent,
+          price: item.querySelector(SELECTORS.itemPrice).textContent,
+          link: item.querySelector(SELECTORS.itemLink).href
         }
       })
-    }
-    )
-    options = options.filter(option => {
-      if (REGEXES.iPhone14ProMax.test(option.title)) {
+    }, SELECTORS)
+  }
+
+  // Filters titles to have "iPhone 14 Pro Max" in it
+  function filterItemsByTitle (items) {
+    return items.filter(item => {
+      if (REGEXES.iPhone14ProMax.test(item.title)) {
         return true
       }
       return false
     })
-    return options
-  };
+  }
 
-  const page2 = await browser.newPage()
-  async function checkDescription (itemsArr) {
-    await page2.setViewport({ width: 1920, height: 1080 })
-    await Promise.each(itemsArr, async (obj) => {
-      await page2.goto(obj.link)
-      const description = await page2.$eval('div[data-cy="ad_description"] > div', elem => {
-        console.log(elem.textContent)
+  // Adds description to the item onject and filters for items whith 100% battery health
+  async function getDescription (items) {
+    const updatedItems = []
+    await Promise.each(items, async (obj) => {
+      await page2.bringToFront()
+
+      await page2.goto(obj.link, { timeout: 0 })
+
+      await page2.waitForSelector(SELECTORS.itemDescription)
+
+      const description = await page2.$eval(SELECTORS.itemDescription, elem => {
         return elem.textContent
       })
-      if (!REGEXES.viataBaterie.test(description)) {
-        itemsArr.splice(itemsArr.indexOf(obj), 1)
-      } else {
+      if (REGEXES.batteryLife.test(description)) {
         obj.description = description
+        updatedItems.push(obj)
       }
     })
 
-    return itemsArr
+    return updatedItems
   }
 
-  const finalItems = []
-  while (finalItems.length <= 5) {
-    let itemsOnPage = await getItems()
-
-    itemsOnPage = await checkDescription(itemsOnPage)
-
-    if (itemsOnPage.length > 5) {
-      itemsOnPage.splice(5)
-    }
-
-    finalItems.push(...itemsOnPage)
-
+  async function scrapperLogic () {
     await page.bringToFront()
+
+    let itemsOnPage = await getItemsWithoutFeatured()
+
+    itemsOnPage = filterItemsByTitle(itemsOnPage)
 
     await page.waitForSelector(SELECTORS.nextPage)
 
     await page.click(SELECTORS.nextPage)
 
-    await page2.bringToFront()
+    itemsOnPage = await getDescription(itemsOnPage)
+
+    finalItems.push(...itemsOnPage)
+
+    if (finalItems.length > 4) {
+      return finalItems
+    } else {
+      return scrapperLogic()
+    }
   }
 
+  let finalItems = []
+  finalItems = await scrapperLogic()
+
+  if (finalItems.length > 5) {
+    finalItems.splice(5)
+  }
   console.log(finalItems)
 
   await browser.close()
